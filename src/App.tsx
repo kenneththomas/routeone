@@ -74,6 +74,7 @@ type ProgressTab = "anchors" | "towns" | "stats";
 type AnchorFilter = "teleportable" | "recent" | "all";
 type AnchorSort = "recent" | "name" | "distance";
 type TownSort = "recent" | "name";
+type CommandMode = "go" | "route" | "anchor";
 
 type OsrmNearestResponse = {
   code: string;
@@ -317,6 +318,8 @@ export default function App() {
     lon: HOME.lon,
   });
   const [isProgressMenuOpen, setIsProgressMenuOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [commandMode, setCommandMode] = useState<CommandMode>("go");
   const [progressTab, setProgressTab] = useState<ProgressTab>("anchors");
   const [progressSearch, setProgressSearch] = useState("");
   const [anchorFilter, setAnchorFilter] = useState<AnchorFilter>("teleportable");
@@ -1703,64 +1706,59 @@ export default function App() {
       <div id="map" aria-label="Drivable OpenStreetMap view" />
 
       <section className="hud" aria-label="Driver telemetry">
-        <div>
-          <span>Speed</span>
-          <strong>{hud.speedMph.toFixed(1)} mph</strong>
+        <div className="hud-primary">
+          <div>
+            <span>Speed</span>
+            <strong>{hud.speedMph.toFixed(1)}</strong>
+            <small>mph</small>
+          </div>
+          <div className="hud-road">
+            <span>{currentLocation ? "Current location" : "Nearest road"}</span>
+            <strong>{currentLocation?.label || roadName || "Exploring the map"}</strong>
+          </div>
         </div>
-        <div>
-          <span>Position</span>
-          <strong>
-            {hud.lat.toFixed(5)}, {hud.lon.toFixed(5)}
-          </strong>
-        </div>
-        <div>
-          <span>Heading</span>
-          <strong>{Math.round(hud.heading)} deg</strong>
-        </div>
-        <div>
-          <span>Cruise</span>
-          <strong>{isCruiseEnabled ? `${cruiseSpeedMph} mph` : "Off"}</strong>
-        </div>
-        <div>
-          <span>Road snap</span>
-          <strong>
-            {snapStatus}
-            {snapDistance !== null ? ` (${snapDistance.toFixed(0)} m)` : ""}
-          </strong>
-        </div>
-        <div>
-          <span>Road</span>
-          <strong>{roadName || "Nearest segment"}</strong>
-        </div>
-        <div>
-          <span>Location</span>
-          <strong>{locationStatus}</strong>
-        </div>
-        <div>
-          <span>Route</span>
-          <strong>
+        <div className="hud-status-row">
+          <span className={isCruiseEnabled ? "status-chip active" : "status-chip"}>
+            Cruise {isCruiseEnabled ? `${cruiseSpeedMph}` : "off"}
+          </span>
+          <span
+            className={
+              isAutopilotEnabled ? "status-chip autopilot" : "status-chip"
+            }
+          >
             {routeStatus}
-            {routePointCount > 0 ? ` (${routePointCount})` : ""}
-          </strong>
+            {routePointCount > 0 ? ` / ${routePointCount} pts` : ""}
+          </span>
+          <span className="status-chip">{xp} XP</span>
         </div>
-        <div>
-          <span>XP</span>
-          <strong>{xp}</strong>
-        </div>
+        <details className="hud-details">
+          <summary>Driver details</summary>
+          <dl>
+            <div><dt>Position</dt><dd>{hud.lat.toFixed(5)}, {hud.lon.toFixed(5)}</dd></div>
+            <div><dt>Heading</dt><dd>{Math.round(hud.heading)} deg</dd></div>
+            <div><dt>Road snap</dt><dd>{snapStatus}{snapDistance !== null ? ` / ${snapDistance.toFixed(0)} m` : ""}</dd></div>
+            <div><dt>Location</dt><dd>{locationStatus}</dd></div>
+          </dl>
+        </details>
       </section>
 
-      {isLocationEnabled && currentLocation ? (
-        <aside className="location-banner" aria-label="Current location">
-          <span>Now on</span>
-          <strong>{currentLocation.label}</strong>
+      {isPoiPlaceMode ? (
+        <aside className="mode-banner anchor-mode" aria-live="polite">
+          <span>Anchor mode</span>
+          <strong>Click the map to place {poiName}</strong>
+          <button type="button" onClick={() => setIsPoiPlaceMode(false)}>Cancel</button>
         </aside>
-      ) : null}
-
-      {isLocationEnabled && locationHistory.length > 0 ? (
-        <aside className="location-log" aria-label="Recent locations">
-          {locationHistory.map((fix) => (
-            <div key={fix.id}>{fix.label}</div>
-          ))}
+      ) : isRouteDrawMode ? (
+        <aside className="mode-banner route-mode" aria-live="polite">
+          <span>Route mode</span>
+          <strong>Click to add waypoints / right-click to undo</strong>
+          <button type="button" onClick={() => setIsRouteDrawMode(false)}>Done</button>
+        </aside>
+      ) : isAutopilotEnabled ? (
+        <aside className="mode-banner autopilot-mode" aria-live="polite">
+          <span>Autopilot active</span>
+          <strong>Following route at {isCruiseEnabled ? cruiseSpeedMph : 35} mph</strong>
+          <button type="button" onClick={() => setIsAutopilotEnabled(false)}>Stop</button>
         </aside>
       ) : null}
 
@@ -1957,147 +1955,59 @@ export default function App() {
         </aside>
       ) : null}
 
-      <div className="controls" aria-label="Map controls">
-        <button type="button" onClick={resetToSpawn}>
-          Reset to spawn
-        </button>
+      <div className="settings-cluster" aria-label="Map controls">
         <button type="button" onClick={() => setIsProgressMenuOpen(true)}>
-          Progress
+          Progress <span className="xp-badge">{xp}</span>
         </button>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={isNightMode}
-            onChange={(event) => setIsNightMode(event.target.checked)}
-          />
-          <span>Night</span>
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={isRoadSnapEnabled}
-            onChange={(event) => setIsRoadSnapEnabled(event.target.checked)}
-          />
-          <span>Snap</span>
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={isLocationEnabled}
-            onChange={(event) => setIsLocationEnabled(event.target.checked)}
-          />
-          <span>Location</span>
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={isRouteDrawMode}
-            onChange={(event) => setIsRouteDrawMode(event.target.checked)}
-          />
-          <span>Waypoints</span>
-        </label>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={isAutopilotEnabled}
-            disabled={routePointCount < 2}
-            onChange={(event) => setIsAutopilotEnabled(event.target.checked)}
-          />
-          <span>Autopilot</span>
-        </label>
-        <button type="button" onClick={clearRoute}>
-          Clear route
+        <button
+          type="button"
+          aria-expanded={isSettingsOpen}
+          onClick={() => setIsSettingsOpen((open) => !open)}
+        >
+          Settings
         </button>
-        <label className="cruise-control">
-          <span>Cruise</span>
-          <input
-            type="checkbox"
-            checked={isCruiseEnabled}
-            onChange={(event) => setIsCruiseEnabled(event.target.checked)}
-          />
-          <input
-            aria-label="Cruise speed in miles per hour"
-            type="number"
-            min="0"
-            max={MAX_CRUISE_MPH}
-            step="1"
-            value={cruiseSpeedMph}
-            onChange={(event) => {
-              const nextValue = Number(event.target.value);
-              setCruiseSpeedMph(
-                Number.isFinite(nextValue)
-                  ? clamp(Math.round(nextValue), 0, MAX_CRUISE_MPH)
-                  : 0,
-              );
-            }}
-          />
-          <span>mph</span>
-        </label>
+        {isSettingsOpen ? (
+          <div className="settings-menu">
+            <button className="settings-progress-button" type="button" onClick={() => { setIsProgressMenuOpen(true); setIsSettingsOpen(false); }}>Progress / {xp} XP</button>
+            <label className="switch-row"><span>Night map</span><input type="checkbox" checked={isNightMode} onChange={(event) => setIsNightMode(event.target.checked)} /><i /></label>
+            <label className="switch-row"><span>Road snap</span><input type="checkbox" checked={isRoadSnapEnabled} onChange={(event) => setIsRoadSnapEnabled(event.target.checked)} /><i /></label>
+            <label className="switch-row"><span>Location</span><input type="checkbox" checked={isLocationEnabled} onChange={(event) => setIsLocationEnabled(event.target.checked)} /><i /></label>
+            <button className="reset-button" type="button" onClick={resetToSpawn}>Reset to spawn</button>
+          </div>
+        ) : null}
       </div>
 
-      <form
-        className="teleport-control"
-        aria-label="Teleport to location"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void teleportToQuery();
-        }}
-      >
-        <input
-          aria-label="Teleport destination"
-          type="search"
-          placeholder="Teleport to..."
-          value={teleportQuery}
-          onChange={(event) => setTeleportQuery(event.target.value)}
-        />
-        <button type="submit">Teleport</button>
-        {teleportStatus ? <span>{teleportStatus}</span> : null}
-      </form>
+      <section className="command-bar" aria-label="Map command bar">
+        <nav className="command-tabs" aria-label="Command type">
+          {(["go", "route", "anchor"] as CommandMode[]).map((mode) => (
+            <button key={mode} type="button" className={commandMode === mode ? "active" : ""} onClick={() => setCommandMode(mode)}>
+              {mode === "go" ? "Go to" : mode === "route" ? "Route" : "Add anchor"}
+            </button>
+          ))}
+        </nav>
 
-      <form
-        className="poi-control"
-        aria-label="Add anchor"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!poiName.trim()) {
-            setPoiStatus("Name required");
-            return;
-          }
-          setIsPoiPlaceMode(true);
-        }}
-      >
-        <input
-          aria-label="Anchor name"
-          type="text"
-          placeholder="Anchor name"
-          value={poiName}
-          onChange={(event) => setPoiName(event.target.value)}
-        />
-        <input
-          aria-label="Anchor description"
-          type="text"
-          placeholder="Description optional"
-          value={poiDescription}
-          onChange={(event) => setPoiDescription(event.target.value)}
-        />
-        <button type="submit" disabled={!poiName.trim() || isPoiPlaceMode}>
-          {isPoiPlaceMode ? "Click map" : "Place Anchor"}
-        </button>
-        {isPoiPlaceMode ? (
-          <button
-            type="button"
-            onClick={() => {
-              setIsPoiPlaceMode(false);
-              isPoiPlaceModeRef.current = false;
-              setPoiStatus("");
-              blurActiveControl();
-            }}
-          >
-            Cancel
-          </button>
-        ) : null}
-        {poiStatus ? <span>{poiStatus}</span> : null}
-      </form>
+        {commandMode === "go" ? (
+          <form className="command-content go-command" aria-label="Teleport to location" onSubmit={(event) => { event.preventDefault(); void teleportToQuery(); }}>
+            <input aria-label="Teleport destination" type="search" placeholder="Search an address or place" value={teleportQuery} onChange={(event) => setTeleportQuery(event.target.value)} />
+            <button className="primary-action" type="submit">Go</button>
+            {teleportStatus ? <span className="command-status">{teleportStatus}</span> : null}
+          </form>
+        ) : commandMode === "route" ? (
+          <div className="command-content route-command">
+            <button className={isRouteDrawMode ? "mode-action active" : "mode-action"} type="button" onClick={() => setIsRouteDrawMode((active) => !active)}>{isRouteDrawMode ? "Finish drawing" : "Draw route"}</button>
+            <button className={isAutopilotEnabled ? "mode-action autopilot-active" : "mode-action"} type="button" disabled={routePointCount < 2} onClick={() => setIsAutopilotEnabled((active) => !active)}>{isAutopilotEnabled ? "Stop autopilot" : "Autopilot"}</button>
+            <label className="cruise-control"><input type="checkbox" checked={isCruiseEnabled} onChange={(event) => setIsCruiseEnabled(event.target.checked)} /><span>Cruise</span><input aria-label="Cruise speed in miles per hour" type="number" min="0" max={MAX_CRUISE_MPH} step="1" value={cruiseSpeedMph} onChange={(event) => { const nextValue = Number(event.target.value); setCruiseSpeedMph(Number.isFinite(nextValue) ? clamp(Math.round(nextValue), 0, MAX_CRUISE_MPH) : 0); }} /><span>mph</span></label>
+            <button className="quiet-action" type="button" disabled={routePointCount === 0} onClick={clearRoute}>Clear</button>
+          </div>
+        ) : (
+          <form className="command-content anchor-command" aria-label="Add anchor" onSubmit={(event) => { event.preventDefault(); if (!poiName.trim()) { setPoiStatus("Name required"); return; } setIsPoiPlaceMode(true); }}>
+            <input aria-label="Anchor name" type="text" placeholder="Anchor name" value={poiName} onChange={(event) => setPoiName(event.target.value)} />
+            <input aria-label="Anchor description" type="text" placeholder="Optional description" value={poiDescription} onChange={(event) => setPoiDescription(event.target.value)} />
+            <button className="primary-action anchor-action" type="submit" disabled={!poiName.trim() || isPoiPlaceMode}>{isPoiPlaceMode ? "Click map" : "Place"}</button>
+            {poiStatus ? <span className="command-status">{poiStatus}</span> : null}
+          </form>
+        )}
+      </section>
     </main>
   );
 }
