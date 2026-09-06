@@ -70,6 +70,10 @@ type ProgressSave = {
   spawnPoint: Position;
 };
 
+type SavedLocation = Position & {
+  heading: number;
+};
+
 type ProgressTab = "anchors" | "towns" | "stats";
 type AnchorFilter = "teleportable" | "recent" | "all";
 type AnchorSort = "recent" | "name" | "distance";
@@ -86,8 +90,17 @@ type OsrmNearestResponse = {
 };
 
 type NominatimReverseResponse = {
+  name?: string;
   display_name?: string;
+  category?: string;
+  type?: string;
   address?: {
+    house_number?: string;
+    amenity?: string;
+    shop?: string;
+    tourism?: string;
+    leisure?: string;
+    office?: string;
     road?: string;
     pedestrian?: string;
     footway?: string;
@@ -98,6 +111,7 @@ type NominatimReverseResponse = {
     quarter?: string;
     city_district?: string;
     borough?: string;
+    hamlet?: string;
     village?: string;
     town?: string;
     city?: string;
@@ -112,6 +126,17 @@ type NominatimSearchResult = {
   lat: string;
   lon: string;
   display_name?: string;
+};
+
+type AnchorSuggestion = {
+  name: string;
+  description: string;
+  address: string;
+};
+
+type QuickAnchorNotice = {
+  id: number;
+  name: string;
 };
 
 const HOME = {
@@ -140,6 +165,8 @@ const ROUTE_ARRIVAL_DISTANCE_METERS = 8;
 const DEFAULT_AUTOPILOT_MPH = 35;
 const POI_STORAGE_KEY = "route-one-points-of-interest";
 const PROGRESS_STORAGE_KEY = "route-one-progress";
+const LAST_LOCATION_STORAGE_KEY = "route-one-last-location";
+const LOCATION_SAVE_INTERVAL_MS = 1_000;
 const TOWN_VISIT_XP = 10;
 const ANCHOR_VISIT_XP = 5;
 const TELEPORT_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -150,6 +177,56 @@ const clamp = (value: number, min: number, max: number) =>
   Math.min(Math.max(value, min), max);
 
 const normalizeHeading = (heading: number) => ((heading % 360) + 360) % 360;
+
+const loadLastLocation = (): SavedLocation => {
+  try {
+    const storedLocation = window.localStorage.getItem(LAST_LOCATION_STORAGE_KEY);
+    if (!storedLocation) {
+      return HOME;
+    }
+
+    const location = JSON.parse(storedLocation) as Partial<SavedLocation>;
+    if (
+      typeof location.lat !== "number" ||
+      typeof location.lon !== "number" ||
+      typeof location.heading !== "number" ||
+      !Number.isFinite(location.lat) ||
+      !Number.isFinite(location.lon) ||
+      !Number.isFinite(location.heading) ||
+      location.lat < -90 ||
+      location.lat > 90 ||
+      location.lon < -180 ||
+      location.lon > 180
+    ) {
+      window.localStorage.removeItem(LAST_LOCATION_STORAGE_KEY);
+      return HOME;
+    }
+
+    return {
+      lat: location.lat,
+      lon: location.lon,
+      heading: normalizeHeading(location.heading),
+    };
+  } catch {
+    return HOME;
+  }
+};
+
+const saveLastLocation = (driver: DriverState) => {
+  try {
+    const location: SavedLocation = {
+      lat: driver.lat,
+      lon: driver.lon,
+      heading: normalizeHeading(driver.heading),
+    };
+    window.localStorage.setItem(
+      LAST_LOCATION_STORAGE_KEY,
+      JSON.stringify(location),
+    );
+  } catch {
+    // Keep driving if storage is unavailable.
+  }
+};
 
 const metersPerSecondToMph = (value: number) => value * 2.23694;
 
@@ -170,6 +247,13 @@ const escapeHtml = (value: string) =>
 
     return entities[character];
   });
+
+const formatPlaceType = (value: string) =>
+  value
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
 
 const blurActiveControl = () => {
   if (document.activeElement instanceof HTMLElement) {
@@ -249,6 +333,7 @@ const createCarIcon = () =>
   });
 
 export default function App() {
+  const initialLocation = useMemo(loadLastLocation, []);
   const mapRef = useRef<L.Map | null>(null);
   const markerRef = useRef<L.Marker | null>(null);
   const routeLineRef = useRef<L.Polyline | null>(null);
@@ -256,16 +341,24 @@ export default function App() {
   const routeEndRef = useRef<L.CircleMarker | null>(null);
   const poiMarkersRef = useRef<Map<number, L.Marker>>(new Map());
   const carElementRef = useRef<HTMLElement | null>(null);
-  const driverRef = useRef<DriverState>({ ...HOME });
-  const displayPositionRef = useRef<Position>({ lat: HOME.lat, lon: HOME.lon });
-  const snapTargetRef = useRef<Position>({ lat: HOME.lat, lon: HOME.lon });
+  const driverRef = useRef<DriverState>({ ...initialLocation, velocity: 0 });
+  const displayPositionRef = useRef<Position>({
+    lat: initialLocation.lat,
+    lon: initialLocation.lon,
+  });
+  const snapTargetRef = useRef<Position>({
+    lat: initialLocation.lat,
+    lon: initialLocation.lon,
+  });
   const pressedKeysRef = useRef<Set<string>>(new Set());
   const lastFrameRef = useRef<number | null>(null);
+  const lastLocationSaveRef = useRef(0);
   const animationRef = useRef<number | null>(null);
   const lastSnapRequestRef = useRef(0);
   const pendingSnapRef = useRef(false);
   const snapRequestIdRef = useRef(0);
   const pendingLocationRef = useRef(false);
+  const quickAnchorPendingRef = useRef(false);
   const locationRequestIdRef = useRef(0);
   const lastLocationLookupRef = useRef(0);
   const lastLocationPositionRef = useRef<Position | null>(null);
@@ -309,6 +402,15 @@ export default function App() {
   const poiNameRef = useRef("");
   const poiDescriptionRef = useRef("");
   const [poiStatus, setPoiStatus] = useState("");
+  const [pendingPoiPosition, setPendingPoiPosition] = useState<Position | null>(
+    null,
+  );
+  const [pendingPoiAddress, setPendingPoiAddress] = useState("");
+  const [isPoiLookupPending, setIsPoiLookupPending] = useState(false);
+  const [quickAnchorNotice, setQuickAnchorNotice] =
+    useState<QuickAnchorNotice | null>(null);
+  const [quickAnchorRename, setQuickAnchorRename] = useState("");
+  const [isQuickAnchorRenaming, setIsQuickAnchorRenaming] = useState(false);
   const [pointsOfInterest, setPointsOfInterest] = useState<PointOfInterest[]>([]);
   const [xp, setXp] = useState(0);
   const [visitedTowns, setVisitedTowns] = useState<VisitedTown[]>([]);
@@ -328,7 +430,8 @@ export default function App() {
   const [progressStatus, setProgressStatus] = useState("");
   const [xpToast, setXpToast] = useState("");
   const [hud, setHud] = useState<HudState>({
-    ...HOME,
+    ...initialLocation,
+    velocity: 0,
     speedMph: 0,
   });
   const carIcon = useMemo(() => createCarIcon(), []);
@@ -850,13 +953,14 @@ export default function App() {
     }
   }, [recordTownVisit]);
 
-  const getEstimatedAddress = useCallback(async (position: Position) => {
+  const getAnchorSuggestion = useCallback(async (position: Position) => {
     const params = new URLSearchParams({
       lat: String(position.lat),
       lon: String(position.lon),
       format: "jsonv2",
       addressdetails: "1",
       zoom: "18",
+      layer: "address,poi",
     });
     const response = await fetch(
       `https://nominatim.openstreetmap.org/reverse?${params}`,
@@ -875,29 +979,132 @@ export default function App() {
       address.cycleway ??
       address.path ??
       "";
-    const place =
-      address.neighbourhood ??
-      address.suburb ??
-      address.quarter ??
-      address.city_district ??
-      address.borough ??
+    const town =
+      address.hamlet ??
       address.village ??
       address.town ??
-      address.municipality ??
       address.city ??
+      address.municipality ??
+      address.borough ??
+      address.city_district ??
+      address.suburb ??
+      address.neighbourhood ??
+      address.quarter ??
       address.county ??
       "";
+    const placeName =
+      data.name ??
+      address.amenity ??
+      address.shop ??
+      address.tourism ??
+      address.leisure ??
+      address.office ??
+      "";
+    const suggestedName = placeName
+      ? town && !placeName.toLowerCase().includes(town.toLowerCase())
+        ? `${town} ${placeName}`
+        : placeName
+      : town && street
+        ? `${town} ${street}`
+        : town
+          ? `${town} Anchor`
+          : street || "New Anchor";
+    const streetAddress = [address.house_number, street]
+      .filter(Boolean)
+      .join(" ");
     const region = [address.state, address.postcode].filter(Boolean).join(" ");
-
-    return (
-      [street, place, region].filter(Boolean).join(", ") ||
+    const estimatedAddress =
+      [streetAddress, town, region].filter(Boolean).join(", ") ||
       data.display_name ||
-      "Estimated address unavailable"
-    );
+      "Estimated address unavailable";
+    const description = placeName
+      ? formatPlaceType(data.type ?? data.category ?? "Place")
+      : "";
+
+    return {
+      name: suggestedName,
+      description,
+      address: estimatedAddress,
+    } satisfies AnchorSuggestion;
   }, []);
 
-  const addPointOfInterest = useCallback(
+  const dropQuickAnchor = useCallback(async () => {
+    if (quickAnchorPendingRef.current || !mapRef.current) {
+      return;
+    }
+
+    quickAnchorPendingRef.current = true;
+    const position = { ...displayPositionRef.current };
+    setPoiStatus("Dropping Quick Anchor...");
+
+    let suggestion: AnchorSuggestion;
+    try {
+      suggestion = await getAnchorSuggestion(position);
+    } catch {
+      suggestion = {
+        name: "New Anchor",
+        description: "",
+        address: "Estimated address unavailable",
+      };
+    }
+
+    const poi: PointOfInterest = {
+      id: Date.now(),
+      name: suggestion.name,
+      description: suggestion.description,
+      lat: position.lat,
+      lon: position.lon,
+      address: suggestion.address,
+    };
+
+    addPoiMarker(poi);
+    setPointsOfInterest((pois) => [poi, ...pois]);
+    recordPoiVisit(poi);
+    setQuickAnchorRename(poi.name);
+    setIsQuickAnchorRenaming(false);
+    setQuickAnchorNotice({ id: poi.id, name: poi.name });
+    setPoiStatus(`Quick Anchor: ${poi.name}`);
+    quickAnchorPendingRef.current = false;
+  }, [addPoiMarker, getAnchorSuggestion, recordPoiVisit]);
+
+  const selectPointOfInterestLocation = useCallback(
     async (position: Position) => {
+      setPendingPoiPosition(position);
+      setPendingPoiAddress("");
+      setIsPoiLookupPending(true);
+      setPoiStatus("Finding nearby place...");
+
+      try {
+        const suggestion = await getAnchorSuggestion(position);
+        setPendingPoiAddress(suggestion.address);
+
+        if (!poiNameRef.current.trim()) {
+          poiNameRef.current = suggestion.name;
+          setPoiName(suggestion.name);
+        }
+
+        if (!poiDescriptionRef.current.trim() && suggestion.description) {
+          poiDescriptionRef.current = suggestion.description;
+          setPoiDescription(suggestion.description);
+        }
+
+        setPoiStatus("Suggestion ready — edit it or save");
+      } catch {
+        if (!poiNameRef.current.trim()) {
+          poiNameRef.current = "New Anchor";
+          setPoiName("New Anchor");
+        }
+        setPendingPoiAddress("Estimated address unavailable");
+        setPoiStatus("Place details unavailable — edit it or save");
+      } finally {
+        setIsPoiLookupPending(false);
+      }
+    },
+    [getAnchorSuggestion],
+  );
+
+  const addPointOfInterest = useCallback(
+    (position: Position, address: string) => {
       const map = mapRef.current;
       const name = poiNameRef.current.trim();
 
@@ -911,22 +1118,13 @@ export default function App() {
         return;
       }
 
-      setPoiStatus("Estimating address...");
-
-      let address = "Estimated address unavailable";
-      try {
-        address = await getEstimatedAddress(position);
-      } catch {
-        address = "Estimated address unavailable";
-      }
-
       const poi: PointOfInterest = {
         id: Date.now(),
         name,
         description: poiDescriptionRef.current.trim(),
         lat: position.lat,
         lon: position.lon,
-        address,
+        address: address || "Estimated address unavailable",
       };
       addPoiMarker(poi);
       setPointsOfInterest((pois) => [poi, ...pois]);
@@ -934,11 +1132,13 @@ export default function App() {
       setPoiStatus(`Anchored ${name}`);
       setPoiName("");
       setPoiDescription("");
+      setPendingPoiPosition(null);
+      setPendingPoiAddress("");
       setIsPoiPlaceMode(false);
       isPoiPlaceModeRef.current = false;
       blurActiveControl();
     },
-    [addPoiMarker, getEstimatedAddress, recordPoiVisit],
+    [addPoiMarker, recordPoiVisit],
   );
 
   const removePointOfInterest = useCallback((id: number) => {
@@ -952,9 +1152,56 @@ export default function App() {
     setPointsOfInterest((pois) => pois.filter((poi) => poi.id !== id));
   }, []);
 
+  const renamePointOfInterest = useCallback((id: number, nextName: string) => {
+    const name = nextName.trim();
+    if (!name) {
+      return;
+    }
+
+    const marker = poiMarkersRef.current.get(id);
+    marker?.remove();
+    poiMarkersRef.current.delete(id);
+    setPointsOfInterest((pois) =>
+      pois.map((poi) => (poi.id === id ? { ...poi, name } : poi)),
+    );
+    setVisitedPois((pois) =>
+      pois.map((poi) => (poi.poiId === id ? { ...poi, name } : poi)),
+    );
+    setQuickAnchorNotice({ id, name });
+    setQuickAnchorRename(name);
+    setIsQuickAnchorRenaming(false);
+    setPoiStatus(`Renamed Anchor to ${name}`);
+  }, []);
+
+  const undoQuickAnchor = useCallback(
+    (id: number) => {
+      removePointOfInterest(id);
+      setVisitedPois((pois) => pois.filter((poi) => poi.poiId !== id));
+      setXp((currentXp) => Math.max(0, currentXp - ANCHOR_VISIT_XP));
+      setXpToast("");
+      setProgressStatus("Quick Anchor removed");
+      setQuickAnchorNotice(null);
+      setIsQuickAnchorRenaming(false);
+      setPoiStatus("Quick Anchor removed");
+    },
+    [removePointOfInterest],
+  );
+
   useEffect(() => {
     removePoiRef.current = removePointOfInterest;
   }, [removePointOfInterest]);
+
+  useEffect(() => {
+    if (!quickAnchorNotice || isQuickAnchorRenaming) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setQuickAnchorNotice(null);
+    }, 10_000);
+
+    return () => window.clearTimeout(timeout);
+  }, [isQuickAnchorRenaming, quickAnchorNotice]);
 
   useEffect(() => {
     pointsOfInterestRef.current = pointsOfInterest;
@@ -1098,6 +1345,24 @@ export default function App() {
     window.localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(progress));
   }, [spawnPoint, visitedPois, visitedTowns, xp]);
 
+  useEffect(() => {
+    const persistCurrentLocation = () => saveLastLocation(driverRef.current);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        persistCurrentLocation();
+      }
+    };
+
+    window.addEventListener("pagehide", persistCurrentLocation);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      persistCurrentLocation();
+      window.removeEventListener("pagehide", persistCurrentLocation);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
   const moveInstantlyTo = useCallback(
     (position: Position, heading = driverRef.current.heading) => {
       driverRef.current = {
@@ -1131,6 +1396,7 @@ export default function App() {
         velocity: 0,
         speedMph: 0,
       });
+      saveLastLocation(driverRef.current);
 
       if (isRoadSnapEnabledRef.current) {
         setSnapStatus("Finding road");
@@ -1252,9 +1518,9 @@ export default function App() {
       setIsRouteDrawMode(false);
       isRouteDrawModeRef.current = false;
       mapRef.current?.dragging.enable();
-      setPoiStatus(poiName.trim() ? "Click map to place" : "Enter a name first");
+      setPoiStatus("Click the map to choose a location");
     }
-  }, [isPoiPlaceMode, poiName]);
+  }, [isPoiPlaceMode]);
 
   useEffect(() => {
     cruiseSpeedMphRef.current = cruiseSpeedMph;
@@ -1302,7 +1568,7 @@ export default function App() {
       zoomControl: false,
       attributionControl: false,
       preferCanvas: true,
-    }).setView([HOME.lat, HOME.lon], FOLLOW_ZOOM);
+    }).setView([initialLocation.lat, initialLocation.lon], FOLLOW_ZOOM);
 
     L.control.zoom({ position: "bottomright" }).addTo(map);
     L.control
@@ -1315,7 +1581,7 @@ export default function App() {
       crossOrigin: true,
     }).addTo(map);
 
-    const marker = L.marker([HOME.lat, HOME.lon], {
+    const marker = L.marker([initialLocation.lat, initialLocation.lon], {
       icon: carIcon,
       interactive: false,
       keyboard: false,
@@ -1336,10 +1602,9 @@ export default function App() {
       if (isPoiPlaceModeRef.current) {
         isPoiPlaceModeRef.current = false;
         setIsPoiPlaceMode(false);
-        setPoiStatus("Placing...");
         map.dragging.enable();
         blurActiveControl();
-        void addPointOfInterest(toPosition(event));
+        void selectPointOfInterestLocation(toPosition(event));
         return;
       }
 
@@ -1373,7 +1638,14 @@ export default function App() {
       markerRef.current = null;
       carElementRef.current = null;
     };
-  }, [addPointOfInterest, addPoiMarker, addRouteWaypoint, carIcon, undoRouteWaypoint]);
+  }, [
+    addPoiMarker,
+    addRouteWaypoint,
+    carIcon,
+    initialLocation,
+    selectPointOfInterestLocation,
+    undoRouteWaypoint,
+  ]);
 
   useEffect(() => {
     const keys = pressedKeysRef.current;
@@ -1412,7 +1684,7 @@ export default function App() {
         isRouteDrawModeRef.current = false;
         mapRef.current?.dragging.enable();
         setPoiStatus((status) =>
-          status === "Click map to place" || status === "Enter a name first"
+          status === "Click the map to choose a location"
             ? ""
             : status,
         );
@@ -1430,6 +1702,14 @@ export default function App() {
       }
 
       if (isTypingTarget(event.target)) {
+        return;
+      }
+
+      if (key === "e") {
+        event.preventDefault();
+        if (!event.repeat) {
+          void dropQuickAnchor();
+        }
         return;
       }
 
@@ -1473,7 +1753,7 @@ export default function App() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, []);
+  }, [dropQuickAnchor]);
 
   useEffect(() => {
     const tick = (timestamp: number) => {
@@ -1669,6 +1949,14 @@ export default function App() {
         speedMph: Math.abs(metersPerSecondToMph(driver.velocity)),
       });
 
+      if (
+        Math.abs(driver.velocity) > 0.01 &&
+        timestamp - lastLocationSaveRef.current >= LOCATION_SAVE_INTERVAL_MS
+      ) {
+        lastLocationSaveRef.current = timestamp;
+        saveLastLocation(driver);
+      }
+
       animationRef.current = requestAnimationFrame(tick);
     };
 
@@ -1730,6 +2018,14 @@ export default function App() {
             {routePointCount > 0 ? ` / ${routePointCount} pts` : ""}
           </span>
           <span className="status-chip">{xp} XP</span>
+          <button
+            className="status-chip quick-anchor-control"
+            type="button"
+            title="Drop a Quick Anchor at your current position (E)"
+            onClick={() => void dropQuickAnchor()}
+          >
+            E · Anchor here
+          </button>
         </div>
         <details className="hud-details">
           <summary>Driver details</summary>
@@ -1745,7 +2041,7 @@ export default function App() {
       {isPoiPlaceMode ? (
         <aside className="mode-banner anchor-mode" aria-live="polite">
           <span>Anchor mode</span>
-          <strong>Click the map to place {poiName}</strong>
+          <strong>Click the map to choose the Anchor location</strong>
           <button type="button" onClick={() => setIsPoiPlaceMode(false)}>Cancel</button>
         </aside>
       ) : isRouteDrawMode ? (
@@ -1765,6 +2061,52 @@ export default function App() {
       {xpToast ? (
         <aside className="xp-toast" aria-live="polite">
           {xpToast}
+        </aside>
+      ) : null}
+
+      {quickAnchorNotice ? (
+        <aside className="quick-anchor-toast" aria-live="polite">
+          {isQuickAnchorRenaming ? (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                renamePointOfInterest(
+                  quickAnchorNotice.id,
+                  quickAnchorRename,
+                );
+              }}
+            >
+              <input
+                autoFocus
+                aria-label="Rename Quick Anchor"
+                type="text"
+                value={quickAnchorRename}
+                onChange={(event) => setQuickAnchorRename(event.target.value)}
+              />
+              <button type="submit" disabled={!quickAnchorRename.trim()}>
+                Save
+              </button>
+            </form>
+          ) : (
+            <>
+              <div>
+                <span>Quick Anchor saved</span>
+                <strong>{quickAnchorNotice.name}</strong>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsQuickAnchorRenaming(true)}
+              >
+                Rename
+              </button>
+              <button
+                type="button"
+                onClick={() => undoQuickAnchor(quickAnchorNotice.id)}
+              >
+                Undo
+              </button>
+            </>
+          )}
         </aside>
       ) : null}
 
@@ -2000,10 +2342,10 @@ export default function App() {
             <button className="quiet-action" type="button" disabled={routePointCount === 0} onClick={clearRoute}>Clear</button>
           </div>
         ) : (
-          <form className="command-content anchor-command" aria-label="Add anchor" onSubmit={(event) => { event.preventDefault(); if (!poiName.trim()) { setPoiStatus("Name required"); return; } setIsPoiPlaceMode(true); }}>
-            <input aria-label="Anchor name" type="text" placeholder="Anchor name" value={poiName} onChange={(event) => setPoiName(event.target.value)} />
+          <form className="command-content anchor-command" aria-label="Add anchor" onSubmit={(event) => { event.preventDefault(); if (!pendingPoiPosition) { setIsPoiPlaceMode(true); return; } if (!poiName.trim()) { setPoiStatus("Name required"); return; } addPointOfInterest(pendingPoiPosition, pendingPoiAddress); }}>
+            <input aria-label="Anchor name" type="text" placeholder="Name will be suggested" value={poiName} onChange={(event) => setPoiName(event.target.value)} />
             <input aria-label="Anchor description" type="text" placeholder="Optional description" value={poiDescription} onChange={(event) => setPoiDescription(event.target.value)} />
-            <button className="primary-action anchor-action" type="submit" disabled={!poiName.trim() || isPoiPlaceMode}>{isPoiPlaceMode ? "Click map" : "Place"}</button>
+            <button className="primary-action anchor-action" type="submit" disabled={isPoiPlaceMode || isPoiLookupPending || Boolean(pendingPoiPosition && !poiName.trim())}>{isPoiLookupPending ? "Looking up..." : pendingPoiPosition ? "Save Anchor" : isPoiPlaceMode ? "Click map" : "Choose spot"}</button>
             {poiStatus ? <span className="command-status">{poiStatus}</span> : null}
           </form>
         )}

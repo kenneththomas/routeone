@@ -23,6 +23,7 @@ npm run build
 - `S` / `ArrowDown` - brake or reverse
 - `A` / `ArrowLeft` - turn left
 - `D` / `ArrowRight` - turn right
+- `E` - drop an auto-named Quick Anchor at the current position
 - `Space` - stop and disable cruise/autopilot
 - Left-click the map - add a waypoint or place an Anchor
 - Right-click the map - remove the latest waypoint

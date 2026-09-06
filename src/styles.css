@@ -141,6 +141,17 @@ select {
   color: #ffffff;
 }
 
+.hud button.quick-anchor-control {
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.hud button.quick-anchor-control:hover {
+  border-color: rgba(233, 154, 75, 0.42);
+  background: rgba(233, 154, 75, 0.16);
+  color: #ffd09d;
+}
+
 .hud-details {
   margin-top: 10px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
@@ -288,6 +299,77 @@ select {
   text-align: center;
   font-weight: 900;
   backdrop-filter: blur(14px);
+}
+
+.quick-anchor-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 104px;
+  z-index: 570;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100vw - 32px);
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  background: rgba(16, 24, 22, 0.94);
+  box-shadow: 0 16px 44px rgba(9, 17, 14, 0.3);
+  color: #ffffff;
+  padding: 9px;
+  backdrop-filter: blur(18px);
+}
+
+.quick-anchor-toast > div {
+  min-width: 150px;
+  padding: 0 5px;
+}
+
+.quick-anchor-toast span,
+.quick-anchor-toast strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.quick-anchor-toast span {
+  color: #9eb3ac;
+  font-size: 0.64rem;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.quick-anchor-toast strong { font-size: 0.86rem; }
+
+.quick-anchor-toast button,
+.quick-anchor-toast input {
+  min-height: 34px;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 9px;
+  font: inherit;
+}
+
+.quick-anchor-toast button {
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  padding: 0 10px;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.quick-anchor-toast button:disabled { opacity: 0.45; }
+
+.quick-anchor-toast form {
+  display: flex;
+  gap: 7px;
+}
+
+.quick-anchor-toast input {
+  width: min(260px, calc(100vw - 120px));
+  outline: 0;
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+  padding: 0 10px;
 }
 
 .progress-menu {
